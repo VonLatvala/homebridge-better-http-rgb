@@ -247,7 +247,8 @@ HTTP_RGB.prototype = {
                 this.log('getPowerState() failed: %s', error.message);
                 callback(error);
             } else {
-                var powerOn = parseInt(responseBody) > 0;
+				var stateObj = JSON.parse(responseBody);
+				var powerOn = stateObj.channel.red > 0 || stateObj.channel.green > 0 || stateObj.channel.blue > 0;
                 this.log('power is currently %s', powerOn ? 'ON' : 'OFF');
                 callback(null, powerOn);
             }
@@ -269,11 +270,12 @@ HTTP_RGB.prototype = {
             return;
         }
 
+		var rgb = this._hsvToRgb(this.cache.hue, this.cache.saturation, this.cache.brightness)
         if (state) {
-            url = this.switch.powerOn.set_url;
+            url = this.switch.powerOn.set_url.replace('{{RED}}', rgb.r).replace('{{GREEN}}', rgb.g).replace('{{BLUE}}', rgb.b);
             body = this.switch.powerOn.body;
         } else {
-            url = this.switch.powerOff.set_url;
+            url = this.switch.powerOn.set_url.replace('{{RED}}', 0).replace('{{GREEN}}', 0).replace('{{BLUE}}', 0);
             body = this.switch.powerOff.body;
         }
 
@@ -306,7 +308,9 @@ HTTP_RGB.prototype = {
                     this.log('getBrightness() failed: %s', error.message);
                     callback(error);
                 } else {
-                    var level = parseInt(responseBody);
+                    var responseObj = JSON.parse(responseBody);
+                    var hsl = this._rgbToHsl(responseObj.channel.red, responseObj.channel.green, responseObj.channel.blue);
+                    var level = hsl.l;
                     this.log('brightness is currently at %s %', level);
                     callback(null, level);
                 }
@@ -365,14 +369,14 @@ HTTP_RGB.prototype = {
                 this.log('... getHue() failed: %s', error.message);
                 callback(error);
             } else {
-                var rgb = responseBody;
-                var levels = this._rgbToHsl(
-                    parseInt(rgb.substr(0,2),16),
-                    parseInt(rgb.substr(2,2),16),
-                    parseInt(rgb.substr(4,2),16)
-                );
+				var stateObj = JSON.parse(responseBody);
+				var hsl = this._rgbToHsl(
+					stateObj.channel.red,
+					stateObj.channel.green,
+					stateObj.channel.blue
+				);
 
-                var hue = levels[0];
+                var hue = hsl.h;
 
                 this.log('... hue is currently %s', hue);
                 this.cache.hue = hue;
@@ -420,14 +424,14 @@ HTTP_RGB.prototype = {
                 this.log('... getSaturation() failed: %s', error.message);
                 callback(error);
             } else {
-                var rgb = responseBody;
-                var levels = this._rgbToHsl(
-                    parseInt(rgb.substr(0,2),16),
-                    parseInt(rgb.substr(2,2),16),
-                    parseInt(rgb.substr(4,2),16)
-                );
+				var stateObj = JSON.parse(responseBody);
+				var hsl = this._rgbToHsl(
+					stateObj.channel.red,
+					stateObj.channel.green,
+					stateObj.channel.blue
+				);
 
-                var saturation = levels[1];
+                var saturation = hsl.s;
 
                 this.log('... saturation is currently %s', saturation);
                 this.cache.saturation = saturation;
@@ -465,24 +469,13 @@ HTTP_RGB.prototype = {
      */
     _setRGB: function(callback) {
         var rgb = this._hsvToRgb(this.cache.hue, this.cache.saturation, this.cache.brightness);
-        var r = this._decToHex(rgb.r);
-        var g = this._decToHex(rgb.g);
-        var b = this._decToHex(rgb.b);
+        var r = rgb.r;
+        var g = rgb.g;
+        var b = rgb.b;
 
-        var url = this.color.set_url.replace('%s', r + g + b);
+        var url = this.color.set_url.replace('{{RED}}', r).replace('{{GREEN}}', g).replace('{{BLUE}}', b);
         this.cacheUpdated = false;
-
-        this.log('_setRGB converting H:%s S:%s B:%s to RGB:%s ...', this.cache.hue, this.cache.saturation, this.cache.brightness, r + g + b);
-
-        this._httpRequest(url, '', this.color.http_method, function(error, response, body) {
-            if (error) {
-                this.log('... _setRGB() failed: %s', error);
-                callback(error);
-            } else {
-                this.log('... _setRGB() successfully set to #%s', r + g + b);
-                callback();
-            }
-        }.bind(this));
+        this._httpRequest(url, '', 'GET', callback);
     },
 
     /** Utility Functions **/
@@ -514,7 +507,7 @@ HTTP_RGB.prototype = {
      * Converts an HSV color value to RGB. Conversion formula
      * adapted from http://stackoverflow.com/a/17243070/2061684
      * Assumes h in [0..360], and s and l in [0..100] and
-     * returns r, g, and b in [0..255].
+     * returns r, g, and b in [0..1].
      *
      * @param   {Number}  h       The hue
      * @param   {Number}  s       The saturation
@@ -541,14 +534,14 @@ HTTP_RGB.prototype = {
             case 4: r = t; g = p; b = v; break;
             case 5: r = v; g = p; b = q; break;
         }
-        var rgb = { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
+        var rgb = { r: r, g: g, b: b };
         return rgb;
     },
 
     /**
      * Converts an RGB color value to HSL. Conversion formula
      * adapted from http://en.wikipedia.org/wiki/HSL_color_space.
-     * Assumes r, g, and b are in [0..255] and
+     * Assumes r, g, and b are in [0..1] and
      * returns h in [0..360], and s and l in [0..100].
      *
      * @param   {Number}  r       The red color value
@@ -557,9 +550,6 @@ HTTP_RGB.prototype = {
      * @return  {Array}           The HSL representation
      */
     _rgbToHsl: function(r, g, b){
-        r /= 255;
-        g /= 255;
-        b /= 255;
         var max = Math.max(r, g, b), min = Math.min(r, g, b);
         var h, s, l = (max + min) / 2;
 
@@ -579,26 +569,7 @@ HTTP_RGB.prototype = {
         h *= 360; // return degrees [0..360]
         s *= 100; // return percent [0..100]
         l *= 100; // return percent [0..100]
-        return [parseInt(h), parseInt(s), parseInt(l)];
+        return {h: parseInt(h), s: parseInt(s), l: parseInt(l)};
     },
-
-    /**
-     * Converts a decimal number into a hexidecimal string, with optional
-     * padding (default 2 characters).
-     *
-     * @param   {Number} d        Decimal number
-     * @param   {String} padding  Padding for the string
-     * @return  {String}          '0' padded hexidecimal number
-     */
-    _decToHex: function(d, padding) {
-        var hex = Number(d).toString(16).toUpperCase();
-        padding = typeof (padding) === 'undefined' || padding === null ? padding = 2 : padding;
-
-        while (hex.length < padding) {
-            hex = '0' + hex;
-        }
-
-        return hex;
-    }
 
 };
